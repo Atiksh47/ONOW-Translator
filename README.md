@@ -1,1 +1,0 @@
-#ONOW-Translator Bot
