@@ -6,18 +6,30 @@ import subprocess
 import requests
 import json
 import time
+import stat
 import logging
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from azure.cognitiveservices.speech import SpeechConfig
 from datetime import datetime, timedelta
 
 def convert_mp4_to_wav(mp4_path: str, wav_path: str) -> None:
+   ''' ffmpeg_path = os.path.join(os.path.dirname(__file__), '../ffmpeg/ffmpeg')
+    os.chmod(ffmpeg_path, os.stat(ffmpeg_path).st_mode | stat.S_IEXEC)
+
     subprocess.run([
+        ffmpeg_path, "-y", "-i", mp4_path,
+        "-ar", "16000",  # 16kHz sample rate for STT
+        "-ac", "1",      # mono channel
+        wav_path
+    ], check=True) '''
+   
+   subprocess.run([
         "ffmpeg", "-y", "-i", mp4_path,
         "-ar", "16000",  # 16kHz sample rate for STT
         "-ac", "1",      # mono channel
         wav_path
     ], check=True)
+    
 
 def upload_to_blob(file_path: str) -> str:
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
