@@ -8,28 +8,70 @@ import json
 import time
 import stat
 import logging
+import zipfile
+import io
+import tarfile
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from azure.cognitiveservices.speech import SpeechConfig
 from datetime import datetime, timedelta
 
+#local Testing
+"""
 def convert_mp4_to_wav(mp4_path: str, wav_path: str) -> None:
-   ''' ffmpeg_path = os.path.join(os.path.dirname(__file__), '../ffmpeg/ffmpeg')
-    os.chmod(ffmpeg_path, os.stat(ffmpeg_path).st_mode | stat.S_IEXEC)
-
-    subprocess.run([
+   ffmpeg_path = os.path.join(os.path.dirname(__file__), 'ffmpeg', 'ffmpeg')
+   
+   subprocess.run([
         ffmpeg_path, "-y", "-i", mp4_path,
         "-ar", "16000",  # 16kHz sample rate for STT
         "-ac", "1",      # mono channel
         wav_path
-    ], check=True) '''
+    ], check=True)
    
-   subprocess.run([
+   '''subprocess.run([
         "ffmpeg", "-y", "-i", mp4_path,
         "-ar", "16000",  # 16kHz sample rate for STT
         "-ac", "1",      # mono channel
         wav_path
-    ], check=True)
+    ], check=True) '''
     
+"""
+#Azure Testing
+def get_tmp_ffmpeg_path() -> str:
+    tmp_ffmpeg_path = "/tmp/ffmpeg"
+    if not os.path.exists(tmp_ffmpeg_path):
+        print("Downloading ffmpeg static Linux build...")
+        ffmpeg_url = "https://www.johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        archive_path = "/tmp/ffmpeg.tar.xz"
+
+        # Download .tar.xz archive
+        with requests.get(ffmpeg_url, stream=True) as r:
+            r.raise_for_status()
+            with open(archive_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+        # Extract archive
+        with tarfile.open(archive_path, mode='r:xz') as tar:
+            for member in tar.getmembers():
+                if member.isfile() and os.path.basename(member.name) == "ffmpeg":
+                    member.name = os.path.basename(member.name)  # Remove path
+                    tar.extract(member, path="/tmp")
+                    break
+
+        os.rename("/tmp/ffmpeg", tmp_ffmpeg_path)
+        os.chmod(tmp_ffmpeg_path, os.stat(tmp_ffmpeg_path).st_mode | stat.S_IEXEC)
+
+    return tmp_ffmpeg_path
+
+def convert_mp4_to_wav(mp4_path: str, wav_path: str) -> None:
+    ffmpeg_path = get_tmp_ffmpeg_path()
+    subprocess.run([
+        ffmpeg_path,
+        "-y", "-i", mp4_path,
+        "-ar", "16000",
+        "-ac", "1",
+        wav_path
+    ], check=True)
 
 def upload_to_blob(file_path: str) -> str:
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
@@ -65,6 +107,7 @@ def translate_to_english(text: str) -> str:
     
     params = {
         "api-version": "3.0",
+        "from": "hi",
         "to": "en"
     }
     
@@ -88,14 +131,11 @@ def create_transcription(file_url: str) -> str:
     body = {
         "displayName": f"Transcription for {file_url}",
         "contentUrls": [file_url],
+        "locale": "hi-IN",
         "properties": {
             "diarizationEnabled": True,
             "wordLevelTimestampsEnabled": True,
-            "languageIdentification": {
-                "candidateLocales": ["en-US", "hi-IN", "te-IN", "ta-IN", "mr-IN", "gu-IN", "kn-IN", "pa-IN", "bn-IN"],
-            }
-        },
-        "locale": "en-US",
+        }
     }
     
     response = requests.post(endpoint, headers=headers, json=body)
@@ -187,6 +227,86 @@ def save_transcript_to_blob(original_text: str, english_text: str, file_id: str)
     english_blob_client = blob_service_client.get_blob_client(container=container_name, blob=english_blob_name)
     english_blob_client.upload_blob(english_text, overwrite=True)
 
+def generate_transcript_blob_link(file_id: str, language: str = "english") -> str:
+    connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+    container_name = os.environ["AZURE_STORAGE_CONTAINER"]
+    blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+
+    # Map language parameter to actual blob naming convention
+    if language.lower() == "original":
+        blob_name = f"transcripts/{file_id}_original.txt"
+    elif language.lower() == "english":
+        blob_name = f"transcripts/{file_id}_english.txt"
+    else:
+        raise ValueError(f"Unsupported language: {language}. Use 'original' or 'english'")
+
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+
+    sas_token = generate_blob_sas(
+        account_name=blob_service_client.account_name,
+        container_name=container_name,
+        blob_name=blob_name,
+        account_key=blob_service_client.credential.account_key,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.utcnow() + timedelta(hours=24)
+    )
+
+    return f"{blob_client.url}?{sas_token}"
+
+
+def send_to_bubble(file_id: str, blob_url: str, max_retries: int = 3, retry_delay: float = 1.0):
+    """
+    Send transcript blob URL to Bubble webhook with retry logic
+    
+    Args:
+        file_id: Unique identifier for the file
+        blob_url: The blob storage URL with SAS token for the transcript
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+    """
+    bubble_endpoint = os.environ.get("BUBBLE_WEBHOOK_URL")
+    
+    if not bubble_endpoint:
+        logging.error("BUBBLE_WEBHOOK_URL environment variable not set")
+        return False
+
+    payload = {
+        "file_id": file_id,
+        "transcript_url": blob_url,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "ONOW-Translator/1.0"
+    }
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(
+                bubble_endpoint, 
+                json=payload, 
+                headers=headers,
+                timeout=30  # 30 second timeout
+            )
+            
+            if response.status_code in [200, 201]:
+                logging.info(f"Successfully sent transcript URL to Bubble (attempt {attempt + 1}): {response.text}")
+                return True
+            else:
+                logging.warning(f"Bubble webhook returned status {response.status_code} (attempt {attempt + 1}): {response.text}")
+                
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Request failed (attempt {attempt + 1}): {str(e)}")
+        
+        # Don't sleep on the last attempt
+        if attempt < max_retries:
+            time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+    
+    logging.error(f"Failed to send transcript URL to Bubble after {max_retries + 1} attempts")
+    return False
+
+
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Function started")
     
@@ -216,6 +336,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         file_id = str(uuid.uuid4())
         save_transcript_to_blob(original_text, english_text, file_id)
+
+        #Level 2: Bubble Integration        
+        transcript_url = generate_transcript_blob_link(file_id, language="english")
+        send_to_bubble(file_id, transcript_url)
+
 
         os.remove(mp4_path)
         os.remove(wav_path)
