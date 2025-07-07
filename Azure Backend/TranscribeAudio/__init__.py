@@ -14,6 +14,7 @@ import tarfile
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from azure.cognitiveservices.speech import SpeechConfig
 from datetime import datetime, timedelta
+from .language_config import get_language_config, get_supported_countries
 
 #local Testing
 """
@@ -94,7 +95,19 @@ def upload_to_blob(file_path: str) -> str:
 
     return f"{blob_client.url}?{sas_token}"
 
-def translate_to_english(text: str) -> str:
+def translate_to_english(text: str, country: str) -> str:
+    """
+    Translate text to English based on the source country/language.
+    
+    Args:
+        text: Text to translate
+        country: Source country (required)
+        
+    Returns:
+        Translated English text
+    """
+    lang_config = get_language_config(country)
+    
     translator_key = os.environ["AZURE_TRANSLATOR_KEY"]
     translator_region = os.environ["AZURE_TRANSLATOR_REGION"]
     endpoint = "https://api.cognitive.microsofttranslator.com/translate"
@@ -107,8 +120,8 @@ def translate_to_english(text: str) -> str:
     
     params = {
         "api-version": "3.0",
-        "from": "hi",
-        "to": "en"
+        "from": lang_config.translate_from,
+        "to": lang_config.translate_to
     }
     
     body = [{"text": text}]
@@ -120,8 +133,16 @@ def translate_to_english(text: str) -> str:
     translation_result = response.json()
     return translation_result[0]["translations"][0]["text"]
 
-def create_transcription(file_url: str) -> str:
-    """Creates a transcription job using Azure Speech REST API"""
+def create_transcription(file_url: str, country: str) -> str:
+    """
+    Creates a transcription job using Azure Speech REST API
+    
+    Args:
+        file_url: URL of the audio file to transcribe
+        country: Source country for language detection (required)
+    """
+    lang_config = get_language_config(country)
+    
     endpoint = f"https://{os.environ['AZURE_SPEECH_REGION']}.api.cognitive.microsoft.com/speechtotext/v3.0/transcriptions"
     headers = {
         "Ocp-Apim-Subscription-Key": os.environ["AZURE_SPEECH_KEY"],
@@ -131,11 +152,11 @@ def create_transcription(file_url: str) -> str:
     body = {
         "displayName": f"Transcription for {file_url}",
         "contentUrls": [file_url],
-        "locale": "hi-IN",
+        "locale": lang_config.speech_locale,
         "properties": {
             "diarizationEnabled": True,
             "wordLevelTimestampsEnabled": True,
-        }
+        },
     }
     
     response = requests.post(endpoint, headers=headers, json=body)
@@ -179,10 +200,16 @@ def get_transcription_result(files_url: str) -> str:
     
     return response.json()
 
-def transcribe_audio_batch(file_url: str) -> tuple[str, str]:
-    """Handles the complete transcription process"""
+def transcribe_audio_batch(file_url: str, country: str) -> tuple[str, str]:
+    """
+    Handles the complete transcription process
+    
+    Args:
+        file_url: URL of the audio file to transcribe
+        country: Source country for language detection (required)
+    """
     # Start transcription
-    transcription_url = create_transcription(file_url)
+    transcription_url = create_transcription(file_url, country)
     logging.info(f"Created transcription job: {transcription_url}")
     
     # Poll for completion
@@ -203,7 +230,7 @@ def transcribe_audio_batch(file_url: str) -> tuple[str, str]:
             })
             
             # Translate to English if needed
-            english_text = translate_to_english(combined_text) if combined_text else ""
+            english_text = translate_to_english(combined_text, country) if combined_text else ""
             
             return combined_text, english_text
             
@@ -313,10 +340,43 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         req_body = req.get_json()
         file_url = req_body.get("file_url")
+        country = req_body.get("country")
+        
+        # Validate required parameters
         if not file_url:
-            return func.HttpResponse("Missing 'file_url' field in JSON body", status_code=400)
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Missing 'file_url' field in JSON body",
+                    "supported_countries": get_supported_countries()
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        if not country:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Missing 'country' field in JSON body",
+                    "supported_countries": get_supported_countries()
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
 
-        logging.info(f"Downloading file from {file_url}")
+        # Validate country is supported
+        try:
+            lang_config = get_language_config(country)
+            logging.info(f"Processing audio from {file_url} for country: {country} ({lang_config.language_name})")
+        except ValueError as e:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": str(e),
+                    "supported_countries": get_supported_countries()
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+
         response = requests.get(file_url)
         if response.status_code != 200:
             return func.HttpResponse("Failed to download file", status_code=400)
@@ -332,7 +392,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         blob_url = upload_to_blob(wav_path)
 
-        original_text, english_text = transcribe_audio_batch(blob_url)
+        original_text, english_text = transcribe_audio_batch(blob_url, country)
 
         file_id = str(uuid.uuid4())
         save_transcript_to_blob(original_text, english_text, file_id)
@@ -349,7 +409,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             json.dumps({
                 "file_id": file_id,
                 "original_text": original_text,
-                "english_text": english_text
+                "english_text": english_text,
+                "country": country,
+                "language": lang_config.language_name,
+                "supported_countries": get_supported_countries()
             }),
             status_code=200,
             mimetype="application/json"
@@ -357,4 +420,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     except Exception as e:
         logging.error(f"Error: {str(e)}")
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+        return func.HttpResponse(
+            json.dumps({
+                "error": str(e),
+                "supported_countries": get_supported_countries()
+            }),
+            status_code=500,
+            mimetype="application/json"
+        )
