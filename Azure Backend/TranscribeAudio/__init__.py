@@ -15,6 +15,87 @@ from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_b
 from azure.cognitiveservices.speech import SpeechConfig
 from datetime import datetime, timedelta
 from .language_config import get_language_config, get_supported_countries
+from langchain.llms import AzureOpenAI
+
+def clean_transcription(text: str, language: str) -> str:
+    """
+    Cleans up transcription text using Azure OpenAI LLM via LangChain.
+    Args:
+        text: The raw transcription text
+        language: The language code (e.g., 'en', 'hi', etc.)
+    Returns:
+        Cleaned transcription string
+    """
+    import os
+    deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+    api_key = os.environ["AZURE_OPENAI_KEY"]
+    azure_endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+
+    prompt = (
+        f"Clean up this {language} transcription: "
+        "remove filler words, repeated words, fix grammar and punctuation, "
+        "and make it easy to translate. Output only the cleaned text.\n\n"
+        f"Transcription:\n{text}\n\nCleaned:"
+    )
+    llm = AzureOpenAI(
+        deployment_name=deployment_name,
+        api_key=api_key,
+        azure_endpoint=azure_endpoint
+    )
+    return llm(prompt)
+
+def polish_english_text(text: str) -> str:
+    """
+    Polishes English text for clarity, grammar, and natural flow using Azure OpenAI LLM via LangChain.
+    Args:
+        text: The English text to polish
+    Returns:
+        Polished English text
+    """
+    import os
+    from langchain.llms import AzureOpenAI
+    deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+    api_key = os.environ["AZURE_OPENAI_KEY"]
+    azure_endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+
+    prompt = (
+        "Polish this English text for clarity, grammar, and natural flow. "
+        "Output only the improved version.\n\n"
+        f"Text:\n{text}\n\nPolished:"
+    )
+    llm = AzureOpenAI(
+        deployment_name=deployment_name,
+        api_key=api_key,
+        azure_endpoint=azure_endpoint
+    )
+    return llm(prompt)
+
+
+def summarize_transcript(text: str) -> str:
+    """
+    Summarizes a transcript, highlighting main points and action items, using Azure OpenAI LLM via LangChain.
+    Args:
+        text: The transcript text to summarize
+    Returns:
+        Summary string
+    """
+    import os
+    from langchain.llms import AzureOpenAI
+    deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+    api_key = os.environ["AZURE_OPENAI_KEY"]
+    azure_endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+
+    prompt = (
+        "Summarize the following voice memo in 2-3 sentences, highlighting the main points and any action items. "
+        "Output only the summary.\n\n"
+        f"Transcript:\n{text}\n\nSummary:"
+    )
+    llm = AzureOpenAI(
+        deployment_name=deployment_name,
+        api_key=api_key,
+        azure_endpoint=azure_endpoint
+    )
+    return llm(prompt)
 
 #local Testing
 """
