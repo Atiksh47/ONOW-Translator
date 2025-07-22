@@ -320,7 +320,7 @@ def transcribe_audio_batch(file_url: str, country: str) -> tuple[str, str]:
             
         time.sleep(5)
 
-def save_transcript_to_blob(original_text: str, english_text: str, file_id: str) -> None:
+def save_transcript_to_blob(original_text: str, cleaned_text: str, english_text: str, polished_english_text: str, summary_text: str, file_id: str) -> None:
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
     container_name = os.environ["AZURE_STORAGE_CONTAINER"]
     blob_service_client = BlobServiceClient.from_connection_string(connect_str)
@@ -330,10 +330,26 @@ def save_transcript_to_blob(original_text: str, english_text: str, file_id: str)
     original_blob_client = blob_service_client.get_blob_client(container=container_name, blob=original_blob_name)
     original_blob_client.upload_blob(original_text, overwrite=True)
     
+    # Save cleaned transcript
+    cleaned_blob_name = f"transcripts/{file_id}_cleaned.txt"
+    cleaned_blob_client = blob_service_client.get_blob_client(container=container_name, blob=cleaned_blob_name)
+    cleaned_blob_client.upload_blob(cleaned_text, overwrite=True)
+    
     # Save English translation
     english_blob_name = f"transcripts/{file_id}_english.txt"
     english_blob_client = blob_service_client.get_blob_client(container=container_name, blob=english_blob_name)
     english_blob_client.upload_blob(english_text, overwrite=True)
+
+    # Save polished English transcript
+    polished_blob_name = f"transcripts/{file_id}_polished.txt"
+    polished_blob_client = blob_service_client.get_blob_client(container=container_name, blob=polished_blob_name)
+    polished_blob_client.upload_blob(polished_english_text, overwrite=True)
+
+    # Save summary
+    summary_blob_name = f"transcripts/{file_id}_summary.txt"
+    summary_blob_client = blob_service_client.get_blob_client(container=container_name, blob=summary_blob_name)
+    summary_blob_client.upload_blob(summary_text, overwrite=True)
+
 
 def generate_transcript_blob_link(file_id: str, language: str = "english") -> str:
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
@@ -343,10 +359,16 @@ def generate_transcript_blob_link(file_id: str, language: str = "english") -> st
     # Map language parameter to actual blob naming convention
     if language.lower() == "original":
         blob_name = f"transcripts/{file_id}_original.txt"
+    elif language.lower() == "cleaned":
+        blob_name = f"transcripts/{file_id}_cleaned.txt"
     elif language.lower() == "english":
         blob_name = f"transcripts/{file_id}_english.txt"
+    elif language.lower() == "polished":
+        blob_name = f"transcripts/{file_id}_polished.txt"
+    elif language.lower() == "summary":
+        blob_name = f"transcripts/{file_id}_summary.txt"
     else:
-        raise ValueError(f"Unsupported language: {language}. Use 'original' or 'english'")
+        raise ValueError(f"Unsupported language: {language}. Use 'original', 'cleaned', 'english', 'polished', or 'summary'")
 
     blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
 
@@ -362,13 +384,15 @@ def generate_transcript_blob_link(file_id: str, language: str = "english") -> st
     return f"{blob_client.url}?{sas_token}"
 
 
-def send_to_bubble(file_id: str, blob_url: str, max_retries: int = 3, retry_delay: float = 1.0):
+def send_to_bubble(file_id: str, blob_url: str, polished_text: str, summary_text: str, max_retries: int = 3, retry_delay: float = 1.0):
     """
-    Send transcript blob URL to Bubble webhook with retry logic
+    Send transcript blob URL, polished text, and summary text to Bubble webhook with retry logic
     
     Args:
         file_id: Unique identifier for the file
         blob_url: The blob storage URL with SAS token for the transcript
+        polished_text: The polished English text
+        summary_text: The summary text
         max_retries: Maximum number of retry attempts
         retry_delay: Delay between retries in seconds
     """
@@ -381,6 +405,8 @@ def send_to_bubble(file_id: str, blob_url: str, max_retries: int = 3, retry_dela
     payload = {
         "file_id": file_id,
         "transcript_url": blob_url,
+        "polished_text": polished_text,
+        "summary_text": summary_text,
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -423,6 +449,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         file_url = req_body.get("file_url")
         country = req_body.get("country")
         
+        # If country is not provided, default to Hindi (India)
+        if not country:
+            country = "India"  # Default to Hindi
+            logging.info("No country provided. Defaulting to Hindi (India).")
+
         # Validate required parameters
         if not file_url:
             return func.HttpResponse(
@@ -434,16 +465,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 mimetype="application/json"
             )
         
-        if not country:
-            return func.HttpResponse(
-                json.dumps({
-                    "error": "Missing 'country' field in JSON body",
-                    "supported_countries": get_supported_countries()
-                }),
-                status_code=400,
-                mimetype="application/json"
-            )
-
         # Validate country is supported
         try:
             lang_config = get_language_config(country)
@@ -452,7 +473,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 json.dumps({
                     "error": str(e),
-                    "supported_countries": get_supported_countries()
+                    "supported_countries": get_supported_countries(),
+                    "note": "If no country is provided, Hindi (India) is assumed by default."
                 }),
                 status_code=400,
                 mimetype="application/json"
@@ -473,14 +495,26 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         blob_url = upload_to_blob(wav_path)
 
-        original_text, english_text = transcribe_audio_batch(blob_url, country)
+        original_text, _ = transcribe_audio_batch(blob_url, country)
+
+        # Step 1: Clean the original transcript
+        cleaned_text = clean_transcription(original_text, lang_config.translate_from)
+
+        # Step 2: Translate the cleaned transcript to English
+        english_text = translate_to_english(cleaned_text, country) if cleaned_text else ""
+
+        # Step 3: Polish the English translation
+        polished_english_text = polish_english_text(english_text) if english_text else ""
+
+        # Step 4: Summarize the polished English transcript
+        summary_text = summarize_transcript(polished_english_text) if polished_english_text else ""
 
         file_id = str(uuid.uuid4())
-        save_transcript_to_blob(original_text, english_text, file_id)
+        save_transcript_to_blob(original_text, cleaned_text, english_text, polished_english_text, summary_text, file_id)
 
         #Level 2: Bubble Integration        
-        transcript_url = generate_transcript_blob_link(file_id, language="english")
-        send_to_bubble(file_id, transcript_url)
+        transcript_url = generate_transcript_blob_link(file_id, language="polished")
+        send_to_bubble(file_id, transcript_url, polished_english_text, summary_text)
 
 
         os.remove(mp4_path)
@@ -490,7 +524,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             json.dumps({
                 "file_id": file_id,
                 "original_text": original_text,
+                "cleaned_text": cleaned_text,
                 "english_text": english_text,
+                "polished_english_text": polished_english_text,
+                "summary_text": summary_text,
                 "country": country,
                 "language": lang_config.language_name,
                 "supported_countries": get_supported_countries()
