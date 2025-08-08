@@ -14,27 +14,120 @@ import tarfile
 from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
 from azure.cognitiveservices.speech import SpeechConfig
 from datetime import datetime, timedelta
+from .language_config import get_language_config, get_supported_countries
+from langchain_openai import AzureChatOpenAI
+
+def clean_transcription(text: str, language: str) -> str:
+    """
+    Cleans up transcription text using Azure OpenAI LLM via LangChain.
+    Args:
+        text: The raw transcription text
+        language: The language code (e.g., 'en', 'hi', etc.)
+    Returns:
+        Cleaned transcription string
+    """
+    import os
+    deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+    api_key = os.environ.get("AZURE_OPENAI_KEY")
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+
+    if not api_key or not azure_endpoint:
+        raise Exception("Missing Azure OpenAI configuration. Please set AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT environment variables.")
+
+    prompt = (
+        f"Clean up this {language} transcription: "
+        "remove filler words, repeated words, fix grammar and punctuation, "
+        "and make it easy to translate. Output only the cleaned text.\n\n"
+        f"Transcription:\n{text}\n\nCleaned:"
+    )
+    llm = AzureChatOpenAI(
+        deployment_name=deployment_name,
+        api_key=api_key,
+        azure_endpoint=azure_endpoint
+    )
+    response = llm.invoke(prompt)
+    return response.content
+
+def polish_english_text(text: str) -> str:
+    """
+    Polishes English text for clarity, grammar, and natural flow using Azure OpenAI LLM via LangChain.
+    Args:
+        text: The English text to polish
+    Returns:
+        Polished English text
+    """
+    import os
+    deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+    api_key = os.environ.get("AZURE_OPENAI_KEY")
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+
+    if not api_key or not azure_endpoint:
+        raise Exception("Missing Azure OpenAI configuration. Please set AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT environment variables.")
+
+    prompt = (
+        "Polish this English text for clarity, grammar, and natural flow. "
+        "Output only the improved version.\n\n"
+        f"Text:\n{text}\n\nPolished:"
+    )
+    llm = AzureChatOpenAI(
+        deployment_name=deployment_name,
+        api_key=api_key,
+        azure_endpoint=azure_endpoint
+    )
+    response = llm.invoke(prompt)
+    return response.content
+
+
+def summarize_transcript(text: str) -> str:
+    """
+    Summarizes a transcript, highlighting main points and action items, using Azure OpenAI LLM via LangChain.
+    Args:
+        text: The transcript text to summarize
+    Returns:
+        Summary string
+    """
+    import os
+    deployment_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+    api_key = os.environ.get("AZURE_OPENAI_KEY")
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+
+    if not api_key or not azure_endpoint:
+        raise Exception("Missing Azure OpenAI configuration. Please set AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT environment variables.")
+
+    prompt = (
+        "Summarize the following voice memo in 2-3 sentences, highlighting the main points and any action items. "
+        "Output only the summary.\n\n"
+        f"Transcript:\n{text}\n\nSummary:"
+    )
+    llm = AzureChatOpenAI(
+        deployment_name=deployment_name,
+        api_key=api_key,
+        azure_endpoint=azure_endpoint
+    )
+    response = llm.invoke(prompt)
+    return response.content
 
 #local Testing
 """
 def convert_mp4_to_wav(mp4_path: str, wav_path: str) -> None:
    ffmpeg_path = os.path.join(os.path.dirname(__file__), 'ffmpeg', 'ffmpeg')
    
-   subprocess.run([
+   '''subprocess.run([
         ffmpeg_path, "-y", "-i", mp4_path,
         "-ar", "16000",  # 16kHz sample rate for STT
         "-ac", "1",      # mono channel
         wav_path
-    ], check=True)
+    ], check=True)'''
    
-   '''subprocess.run([
+   subprocess.run([
         "ffmpeg", "-y", "-i", mp4_path,
         "-ar", "16000",  # 16kHz sample rate for STT
         "-ac", "1",      # mono channel
         wav_path
-    ], check=True) '''
+    ], check=True) 
+    """
     
-"""
+
 #Azure Testing
 def get_tmp_ffmpeg_path() -> str:
     tmp_ffmpeg_path = "/tmp/ffmpeg"
@@ -73,6 +166,8 @@ def convert_mp4_to_wav(mp4_path: str, wav_path: str) -> None:
         wav_path
     ], check=True)
 
+
+
 def upload_to_blob(file_path: str) -> str:
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
     container_name = os.environ["AZURE_STORAGE_CONTAINER"]
@@ -94,7 +189,19 @@ def upload_to_blob(file_path: str) -> str:
 
     return f"{blob_client.url}?{sas_token}"
 
-def translate_to_english(text: str) -> str:
+def translate_to_english(text: str, country: str) -> str:
+    """
+    Translate text to English based on the source country/language.
+    
+    Args:
+        text: Text to translate
+        country: Source country (required)
+        
+    Returns:
+        Translated English text
+    """
+    lang_config = get_language_config(country)
+    
     translator_key = os.environ["AZURE_TRANSLATOR_KEY"]
     translator_region = os.environ["AZURE_TRANSLATOR_REGION"]
     endpoint = "https://api.cognitive.microsofttranslator.com/translate"
@@ -107,8 +214,8 @@ def translate_to_english(text: str) -> str:
     
     params = {
         "api-version": "3.0",
-        "from": "hi",
-        "to": "en"
+        "from": lang_config.translate_from,
+        "to": lang_config.translate_to
     }
     
     body = [{"text": text}]
@@ -120,8 +227,16 @@ def translate_to_english(text: str) -> str:
     translation_result = response.json()
     return translation_result[0]["translations"][0]["text"]
 
-def create_transcription(file_url: str) -> str:
-    """Creates a transcription job using Azure Speech REST API"""
+def create_transcription(file_url: str, country: str) -> str:
+    """
+    Creates a transcription job using Azure Speech REST API
+    
+    Args:
+        file_url: URL of the audio file to transcribe
+        country: Source country for language detection (required)
+    """
+    lang_config = get_language_config(country)
+    
     endpoint = f"https://{os.environ['AZURE_SPEECH_REGION']}.api.cognitive.microsoft.com/speechtotext/v3.0/transcriptions"
     headers = {
         "Ocp-Apim-Subscription-Key": os.environ["AZURE_SPEECH_KEY"],
@@ -131,11 +246,11 @@ def create_transcription(file_url: str) -> str:
     body = {
         "displayName": f"Transcription for {file_url}",
         "contentUrls": [file_url],
-        "locale": "hi-IN",
+        "locale": lang_config.speech_locale,
         "properties": {
             "diarizationEnabled": True,
             "wordLevelTimestampsEnabled": True,
-        }
+        },
     }
     
     response = requests.post(endpoint, headers=headers, json=body)
@@ -179,10 +294,16 @@ def get_transcription_result(files_url: str) -> str:
     
     return response.json()
 
-def transcribe_audio_batch(file_url: str) -> tuple[str, str]:
-    """Handles the complete transcription process"""
+def transcribe_audio_batch(file_url: str, country: str) -> tuple[str, str]:
+    """
+    Handles the complete transcription process
+    
+    Args:
+        file_url: URL of the audio file to transcribe
+        country: Source country for language detection (required)
+    """
     # Start transcription
-    transcription_url = create_transcription(file_url)
+    transcription_url = create_transcription(file_url, country)
     logging.info(f"Created transcription job: {transcription_url}")
     
     # Poll for completion
@@ -203,7 +324,7 @@ def transcribe_audio_batch(file_url: str) -> tuple[str, str]:
             })
             
             # Translate to English if needed
-            english_text = translate_to_english(combined_text) if combined_text else ""
+            english_text = translate_to_english(combined_text, country) if combined_text else ""
             
             return combined_text, english_text
             
@@ -212,7 +333,7 @@ def transcribe_audio_batch(file_url: str) -> tuple[str, str]:
             
         time.sleep(5)
 
-def save_transcript_to_blob(original_text: str, english_text: str, file_id: str) -> None:
+def save_transcript_to_blob(original_text: str, cleaned_text: str, english_text: str, polished_english_text: str, summary_text: str, file_id: str) -> None:
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
     container_name = os.environ["AZURE_STORAGE_CONTAINER"]
     blob_service_client = BlobServiceClient.from_connection_string(connect_str)
@@ -222,10 +343,26 @@ def save_transcript_to_blob(original_text: str, english_text: str, file_id: str)
     original_blob_client = blob_service_client.get_blob_client(container=container_name, blob=original_blob_name)
     original_blob_client.upload_blob(original_text, overwrite=True)
     
+    # Save cleaned transcript
+    cleaned_blob_name = f"transcripts/{file_id}_cleaned.txt"
+    cleaned_blob_client = blob_service_client.get_blob_client(container=container_name, blob=cleaned_blob_name)
+    cleaned_blob_client.upload_blob(cleaned_text, overwrite=True)
+    
     # Save English translation
     english_blob_name = f"transcripts/{file_id}_english.txt"
     english_blob_client = blob_service_client.get_blob_client(container=container_name, blob=english_blob_name)
     english_blob_client.upload_blob(english_text, overwrite=True)
+
+    # Save polished English transcript
+    polished_blob_name = f"transcripts/{file_id}_polished.txt"
+    polished_blob_client = blob_service_client.get_blob_client(container=container_name, blob=polished_blob_name)
+    polished_blob_client.upload_blob(polished_english_text, overwrite=True)
+
+    # Save summary
+    summary_blob_name = f"transcripts/{file_id}_summary.txt"
+    summary_blob_client = blob_service_client.get_blob_client(container=container_name, blob=summary_blob_name)
+    summary_blob_client.upload_blob(summary_text, overwrite=True)
+
 
 def generate_transcript_blob_link(file_id: str, language: str = "english") -> str:
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
@@ -235,10 +372,16 @@ def generate_transcript_blob_link(file_id: str, language: str = "english") -> st
     # Map language parameter to actual blob naming convention
     if language.lower() == "original":
         blob_name = f"transcripts/{file_id}_original.txt"
+    elif language.lower() == "cleaned":
+        blob_name = f"transcripts/{file_id}_cleaned.txt"
     elif language.lower() == "english":
         blob_name = f"transcripts/{file_id}_english.txt"
+    elif language.lower() == "polished":
+        blob_name = f"transcripts/{file_id}_polished.txt"
+    elif language.lower() == "summary":
+        blob_name = f"transcripts/{file_id}_summary.txt"
     else:
-        raise ValueError(f"Unsupported language: {language}. Use 'original' or 'english'")
+        raise ValueError(f"Unsupported language: {language}. Use 'original', 'cleaned', 'english', 'polished', or 'summary'")
 
     blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
 
@@ -254,13 +397,15 @@ def generate_transcript_blob_link(file_id: str, language: str = "english") -> st
     return f"{blob_client.url}?{sas_token}"
 
 
-def send_to_bubble(file_id: str, blob_url: str, max_retries: int = 3, retry_delay: float = 1.0):
+def send_to_bubble(file_id: str, blob_url: str, polished_text: str, summary_text: str, max_retries: int = 3, retry_delay: float = 1.0):
     """
-    Send transcript blob URL to Bubble webhook with retry logic
+    Send transcript blob URL, polished text, and summary text to Bubble webhook with retry logic
     
     Args:
         file_id: Unique identifier for the file
         blob_url: The blob storage URL with SAS token for the transcript
+        polished_text: The polished English text
+        summary_text: The summary text
         max_retries: Maximum number of retry attempts
         retry_delay: Delay between retries in seconds
     """
@@ -273,6 +418,8 @@ def send_to_bubble(file_id: str, blob_url: str, max_retries: int = 3, retry_dela
     payload = {
         "file_id": file_id,
         "transcript_url": blob_url,
+        "polished_text": polished_text,
+        "summary_text": summary_text,
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -313,10 +460,41 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         req_body = req.get_json()
         file_url = req_body.get("file_url")
-        if not file_url:
-            return func.HttpResponse("Missing 'file_url' field in JSON body", status_code=400)
+        country = req_body.get("country") or "India"
+        
+        '''
+        # If country is not provided, default to Hindi (India)
+        if not country:
+            country = "India"  # Default to Hindi
+            logging.info("No country provided. Defaulting to Hindi (India).")
+            '''
 
-        logging.info(f"Downloading file from {file_url}")
+        # Validate required parameters
+        if not file_url:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Missing 'file_url' field in JSON body",
+                    "supported_countries": get_supported_countries()
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        # Validate country is supported
+        try:
+            lang_config = get_language_config(country)
+            logging.info(f"Processing audio from {file_url} for country: {country} ({lang_config.language_name})")
+        except ValueError as e:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": str(e),
+                    "supported_countries": get_supported_countries(),
+                    "note": "If no country is provided, Hindi (India) is assumed by default."
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+
         response = requests.get(file_url)
         if response.status_code != 200:
             return func.HttpResponse("Failed to download file", status_code=400)
@@ -332,14 +510,26 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         blob_url = upload_to_blob(wav_path)
 
-        original_text, english_text = transcribe_audio_batch(blob_url)
+        original_text, _ = transcribe_audio_batch(blob_url, country)
+
+        # Step 1: Clean the original transcript
+        cleaned_text = clean_transcription(original_text, lang_config.translate_from)
+
+        # Step 2: Translate the cleaned transcript to English
+        english_text = translate_to_english(cleaned_text, country) if cleaned_text else ""
+
+        # Step 3: Polish the English translation
+        polished_english_text = polish_english_text(english_text) if english_text else ""
+
+        # Step 4: Summarize the polished English transcript
+        summary_text = summarize_transcript(polished_english_text) if polished_english_text else ""
 
         file_id = str(uuid.uuid4())
-        save_transcript_to_blob(original_text, english_text, file_id)
+        save_transcript_to_blob(original_text, cleaned_text, english_text, polished_english_text, summary_text, file_id)
 
         #Level 2: Bubble Integration        
-        transcript_url = generate_transcript_blob_link(file_id, language="english")
-        send_to_bubble(file_id, transcript_url)
+        transcript_url = generate_transcript_blob_link(file_id, language="polished")
+        send_to_bubble(file_id, transcript_url, polished_english_text, summary_text)
 
 
         os.remove(mp4_path)
@@ -349,7 +539,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             json.dumps({
                 "file_id": file_id,
                 "original_text": original_text,
-                "english_text": english_text
+                "cleaned_text": cleaned_text,
+                "english_text": english_text,
+                "polished_english_text": polished_english_text,
+                "summary_text": summary_text,
+                "country": country,
+                "language": lang_config.language_name,
+                "supported_countries": get_supported_countries()
             }),
             status_code=200,
             mimetype="application/json"
@@ -357,4 +553,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     except Exception as e:
         logging.error(f"Error: {str(e)}")
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+        return func.HttpResponse(
+            json.dumps({
+                "error": str(e),
+                "supported_countries": get_supported_countries()
+            }),
+            status_code=500,
+            mimetype="application/json"
+        )
